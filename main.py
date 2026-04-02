@@ -176,17 +176,19 @@ def process_index(cfg: dict) -> Optional[dict]:
         return None
 
 
-def export_markdown(result_df: pd.DataFrame, output_dir: str = "output"):
-    """导出结果为 Markdown 表格文件"""
+def export_excel(result_df: pd.DataFrame, output_dir: str = "output"):
+    """导出结果为 Excel 文件（百分比列红涨绿跌）并在终端打印表格"""
+    from openpyxl.styles import Font, Alignment, PatternFill
+    from openpyxl.utils import get_column_letter
+
     if result_df.empty:
         print("没有可用数据。")
         return
 
     os.makedirs(output_dir, exist_ok=True)
 
-    data_date = result_df["数据日期"].iloc[0]
     today_str = datetime.now().strftime("%Y%m%d")
-    filepath = os.path.join(output_dir, f"trend_{today_str}.md")
+    filepath = os.path.join(output_dir, f"trend_{today_str}.xlsx")
 
     export_cols = ["排名", "指数名称", "状态", "当日涨幅%", "收盘点位",
                    "临界值点", "偏离率%", "穿越日期", "区间涨幅%"]
@@ -194,23 +196,75 @@ def export_markdown(result_df: pd.DataFrame, output_dir: str = "output"):
 
     yes_count = (result_df["状态"] == "YES").sum()
     total = len(result_df)
-
-    md_table = tabulate(display_df, headers="keys", tablefmt="github",
-                        showindex=False, numalign="right", stralign="center")
-
-    content = (
-        f"# 指数趋势强度统计\n\n"
-        f"**数据日期**: {data_date} | **MA周期**: {MA_PERIOD} | "
-        f"**多头(YES)**: {yes_count}/{total} | **空头(NO)**: {total - yes_count}/{total}\n\n"
-        f"{md_table}\n"
-    )
+    data_date = result_df["数据日期"].iloc[0]
 
     # 终端打印
-    print(f"\n{content}")
+    table = tabulate(display_df, headers="keys", tablefmt="simple",
+                     showindex=False, numalign="right", stralign="center")
+    print(f"\n{'=' * 90}")
+    print(f"  指数趋势强度统计  |  数据日期: {data_date}  |  MA周期: {MA_PERIOD}")
+    print(f"{'=' * 90}")
+    print(table)
+    print(f"{'=' * 90}")
+    print(f"  多头(YES): {yes_count}/{total}  |  空头(NO): {total - yes_count}/{total}\n")
 
-    # 写入文件
-    with open(filepath, "w", encoding="utf-8") as f:
-        f.write(content)
+    # 写入 Excel
+    with pd.ExcelWriter(filepath, engine="openpyxl") as writer:
+        display_df.to_excel(writer, sheet_name=today_str, index=False)
+        ws = writer.sheets[today_str]
+
+        # 百分比列的索引（1-based，+1因为openpyxl从1开始）
+        pct_col_names = {"当日涨幅%", "偏离率%", "区间涨幅%"}
+        pct_col_indices = [i + 1 for i, col in enumerate(export_cols) if col in pct_col_names]
+
+        base_size = 13
+        red_font = Font(color="FF0000", size=base_size)
+        green_font = Font(color="008000", size=base_size)
+        normal_font = Font(size=base_size)
+
+        # 表头样式
+        header_font = Font(bold=True, size=base_size)
+        header_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
+        for col_idx in range(1, len(export_cols) + 1):
+            cell = ws.cell(row=1, column=col_idx)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center")
+
+        center_align = Alignment(horizontal="center", vertical="center")
+
+        # 数据行着色 + 居中
+        for row_idx in range(2, len(display_df) + 2):
+            for col_idx in range(1, len(export_cols) + 1):
+                cell = ws.cell(row=row_idx, column=col_idx)
+                cell.alignment = center_align
+                cell.font = normal_font
+                if col_idx in pct_col_indices:
+                    val = cell.value
+                    if val is not None and val != 0:
+                        cell.font = red_font if val > 0 else green_font
+            # 行高
+            ws.row_dimensions[row_idx].height = 24
+
+        # 表头行高
+        ws.row_dimensions[1].height = 28
+
+        # 列宽：根据内容自适应，中文字符按2倍宽度计算
+        for col_idx in range(1, len(export_cols) + 1):
+            col_letter = get_column_letter(col_idx)
+            max_len = 0
+            for r in range(1, len(display_df) + 2):
+                val = str(ws.cell(row=r, column=col_idx).value or "")
+                # 中文字符占2个宽度
+                char_len = sum(2 if ord(c) > 127 else 1 for c in val)
+                max_len = max(max_len, char_len)
+            ws.column_dimensions[col_letter].width = max(max_len + 6, 12)
+
+        # 添加自动筛选（排序功能）
+        last_col = get_column_letter(len(export_cols))
+        last_row = len(display_df) + 1
+        ws.auto_filter.ref = f"A1:{last_col}{last_row}"
+
     print(f"  已导出: {filepath}")
 
 
@@ -232,11 +286,11 @@ def main():
 
     # 构建 DataFrame，按偏离率降序排名
     result_df = pd.DataFrame(results)
-    result_df = result_df.sort_values("偏离率%", ascending=False).reset_index(drop=True)
+    result_df = result_df.sort_values("当日涨幅%", ascending=False).reset_index(drop=True)
     result_df.insert(0, "排名", range(1, len(result_df) + 1))
 
     # 输出
-    export_markdown(result_df)
+    export_excel(result_df)
 
 
 if __name__ == "__main__":
