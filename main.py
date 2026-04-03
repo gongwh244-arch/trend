@@ -222,9 +222,10 @@ def _write_block(ws, start_row: int, display_df: pd.DataFrame,
     title_cell.alignment = Alignment(horizontal="center", vertical="center")
     ws.row_dimensions[start_row].height = 36
 
-    # 百分比列索引
+    # 特殊着色列索引
     pct_col_names = {"当日涨幅%", "偏离率%", "MA20斜率%"}
     pct_col_indices = [i + 1 for i, col in enumerate(export_cols) if col in pct_col_names]
+    status_col_idx = next((i + 1 for i, col in enumerate(export_cols) if col == "状态"), None)
 
     base_size = 13
     red_font = Font(color="FF0000", size=base_size)
@@ -254,7 +255,9 @@ def _write_block(ws, start_row: int, display_df: pd.DataFrame,
             cell.value = row_data[col_name]
             cell.alignment = center_align
             cell.font = normal_font
-            if col_idx in pct_col_indices:
+            if col_idx == status_col_idx:
+                cell.font = red_font if cell.value == "YES" else green_font
+            elif col_idx in pct_col_indices:
                 val = cell.value
                 if val is not None and val != 0:
                     cell.font = red_font if val > 0 else green_font
