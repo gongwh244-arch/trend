@@ -2,6 +2,7 @@
 
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Optional
 
@@ -102,6 +103,9 @@ def fetch_index_data(cfg: dict) -> pd.DataFrame:
     # 写入缓存
     os.makedirs(CACHE_DIR, exist_ok=True)
     df.to_csv(cache_file, index=False)
+
+    # 网络请求后短暂等待，防止API限流
+    time.sleep(0.3)
 
     return df
 
@@ -348,16 +352,24 @@ def export_excel(index_df: pd.DataFrame, sector_df: pd.DataFrame,
 
 
 def _fetch_group(config_list: list, label: str) -> pd.DataFrame:
-    """获取一组指数/板块数据，返回排序后的 DataFrame"""
+    """获取一组指数/板块数据，多线程并发处理，返回排序后的 DataFrame"""
     print(f"正在获取{label}数据...\n")
     results = []
-    for i, cfg in enumerate(config_list):
-        print(f"  [{i + 1}/{len(config_list)}] {cfg['name']}... ", end="", flush=True)
-        result = process_index(cfg)
-        if result:
-            results.append(result)
-            print(f"OK  收盘:{result['收盘点位']}  偏离率:{result['偏离率%']}%")
-        time.sleep(0.5)
+    total = len(config_list)
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        future_to_cfg = {executor.submit(process_index, cfg): cfg for cfg in config_list}
+        for i, future in enumerate(as_completed(future_to_cfg), 1):
+            cfg = future_to_cfg[future]
+            try:
+                result = future.result()
+                if result:
+                    results.append(result)
+                    print(f"  [{i}/{total}] {cfg['name']}... OK  收盘:{result['收盘点位']}  偏离率:{result['偏离率%']}%")
+                else:
+                    print(f"  [{i}/{total}] {cfg['name']}... 跳过")
+            except Exception as e:
+                print(f"  [{i}/{total}] {cfg['name']}... 失败: {e}")
 
     if not results:
         print(f"\n所有{label}获取失败。")
