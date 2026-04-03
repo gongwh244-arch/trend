@@ -39,3 +39,24 @@ INDEX_CONFIG = [
     {"name": "黄金(GLD)", "source": "us_etf", "symbol": "GLD"},
     {"name": "白银(SLV)", "source": "us_etf", "symbol": "SLV"},
 ]
+
+# 板块配置列表
+SECTOR_CONFIG = [
+    # ========== 中证指数（新浪接口） ==========
+    {"name": "新能源",   "source": "a_share_sina", "symbol": "sz399412"},
+    {"name": "中证煤炭", "source": "a_share_sina", "symbol": "sz399998"},
+    {"name": "红利指数", "source": "a_share_sina", "symbol": "sh000015"},
+    {"name": "证券公司", "source": "a_share_sina", "symbol": "sz399975"},
+    {"name": "中证医疗", "source": "a_share_sina", "symbol": "sz399989"},
+    {"name": "申万化工", "source": "a_share_sina", "symbol": "sz399986"},
+
+    # ========== 其他板块指数（新浪接口） ==========
+    {"name": "光伏产业", "source": "a_share_sina", "symbol": "sz399808"},
+    {"name": "中证消费", "source": "a_share_sina", "symbol": "sh000932"},
+    {"name": "半导体",   "source": "a_share_sina", "symbol": "sz399997"},
+    {"name": "电力设备", "source": "a_share_sina", "symbol": "sz399554"},
+    {"name": "国证地产", "source": "a_share_sina", "symbol": "sz399393"},
+    {"name": "中证军工", "source": "a_share_sina", "symbol": "sz399967"},
+    {"name": "机器人",   "source": "a_share_sina", "symbol": "sz399959"},
+    {"name": "有色金属", "source": "a_share_sina", "symbol": "sz399395"},
+]

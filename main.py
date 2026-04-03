@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 from tabulate import tabulate
 
-from config import INDEX_CONFIG, MA_PERIOD, START_DATE
+from config import INDEX_CONFIG, MA_PERIOD, SECTOR_CONFIG, START_DATE
 
 # 最大重试次数
 MAX_RETRIES = 3
@@ -152,9 +152,18 @@ def process_index(cfg: dict) -> Optional[dict]:
         critical_value = cross_info["critical_value"]
         deviation = round((latest_close - critical_value) / critical_value * 100, 2)
 
-        # 区间涨幅 = (今日收盘 - 穿越当天收盘价) / 穿越当天收盘价
-        cross_close = cross_info["cross_close"]
-        range_change = round((latest_close - cross_close) / cross_close * 100, 2)
+        # 持续天数 = 穿越日期到最新日期的交易日数
+        cross_date = cross_info["cross_date"]
+        duration_days = len(df[(df["date"] >= cross_date) & (df["date"] <= latest_date)]) - 1
+
+        # MA20斜率% = (今日MA20 - 5日前MA20) / 5日前MA20 × 100
+        valid_ma = df.dropna(subset=["ma20"])
+        if len(valid_ma) >= 6:
+            ma20_today = valid_ma["ma20"].iloc[-1]
+            ma20_5ago = valid_ma["ma20"].iloc[-6]
+            ma20_slope = round((ma20_today - ma20_5ago) / ma20_5ago * 100, 2)
+        else:
+            ma20_slope = 0.0
 
         # 状态
         status = "YES" if deviation > 0 else "NO"
@@ -167,7 +176,8 @@ def process_index(cfg: dict) -> Optional[dict]:
             "临界值点": critical_value,
             "偏离率%": deviation,
             "穿越日期": cross_info["cross_date"].strftime("%Y-%m-%d"),
-            "区间涨幅%": range_change,
+            "持续天数": duration_days,
+            "MA20斜率%": ma20_slope,
             "趋势方向": cross_info["direction"],
             "数据日期": latest_date.strftime("%Y-%m-%d"),
         }
@@ -176,121 +186,152 @@ def process_index(cfg: dict) -> Optional[dict]:
         return None
 
 
-def export_excel(result_df: pd.DataFrame, output_dir: str = "output"):
-    """导出结果为 Excel 文件（百分比列红涨绿跌）并在终端打印表格"""
+def _write_sheet(ws, display_df: pd.DataFrame, export_cols: list, title: str):
+    """写入单个 Sheet 的样式（标题行、表头、数据行着色、列宽、自动筛选）"""
     from openpyxl.styles import Font, Alignment, PatternFill
     from openpyxl.utils import get_column_letter
 
-    if result_df.empty:
-        print("没有可用数据。")
-        return
+    last_col_letter = get_column_letter(len(export_cols))
 
+    # 第1行：标题行（合并单元格）
+    ws.merge_cells(f"A1:{last_col_letter}1")
+    title_cell = ws.cell(row=1, column=1)
+    title_cell.value = title
+    title_cell.font = Font(bold=True, size=14)
+    title_cell.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 36
+
+    # 百分比列索引
+    pct_col_names = {"当日涨幅%", "偏离率%", "MA20斜率%"}
+    pct_col_indices = [i + 1 for i, col in enumerate(export_cols) if col in pct_col_names]
+
+    base_size = 13
+    red_font = Font(color="FF0000", size=base_size)
+    green_font = Font(color="008000", size=base_size)
+    normal_font = Font(size=base_size)
+
+    # 表头样式（第2行）
+    header_font = Font(bold=True, size=base_size)
+    header_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
+    for col_idx in range(1, len(export_cols) + 1):
+        cell = ws.cell(row=2, column=col_idx)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center")
+    ws.row_dimensions[2].height = 28
+
+    center_align = Alignment(horizontal="center", vertical="center")
+
+    # 数据行着色 + 居中（从第3行开始）
+    for row_idx in range(3, len(display_df) + 3):
+        for col_idx in range(1, len(export_cols) + 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            cell.alignment = center_align
+            cell.font = normal_font
+            if col_idx in pct_col_indices:
+                val = cell.value
+                if val is not None and val != 0:
+                    cell.font = red_font if val > 0 else green_font
+        ws.row_dimensions[row_idx].height = 24
+
+    # 列宽自适应
+    for col_idx in range(1, len(export_cols) + 1):
+        col_letter = get_column_letter(col_idx)
+        max_len = 0
+        for r in range(2, len(display_df) + 3):
+            val = str(ws.cell(row=r, column=col_idx).value or "")
+            char_len = sum(2 if ord(c) > 127 else 1 for c in val)
+            max_len = max(max_len, char_len)
+        ws.column_dimensions[col_letter].width = max(max_len + 6, 12)
+
+    # 自动筛选（从第2行表头开始）
+    last_row = len(display_df) + 2
+    ws.auto_filter.ref = f"A2:{last_col_letter}{last_row}"
+
+
+def _print_table(display_df: pd.DataFrame, label: str, data_date: str):
+    """终端打印单张表格"""
+    yes_count = (display_df["状态"] == "YES").sum()
+    total = len(display_df)
+    table = tabulate(display_df, headers="keys", tablefmt="simple",
+                     showindex=False, numalign="right", stralign="center")
+    print(f"\n{'=' * 100}")
+    print(f"  {label}  |  数据日期: {data_date}  |  MA周期: {MA_PERIOD}")
+    print(f"{'=' * 100}")
+    print(table)
+    print(f"{'=' * 100}")
+    print(f"  多头(YES): {yes_count}/{total}  |  空头(NO): {total - yes_count}/{total}\n")
+
+
+def export_excel(index_df: pd.DataFrame, sector_df: pd.DataFrame,
+                 output_dir: str = "output"):
+    """导出指数和板块两张表到同一个 Excel 文件"""
     os.makedirs(output_dir, exist_ok=True)
-
     today_str = datetime.now().strftime("%Y%m%d")
     filepath = os.path.join(output_dir, f"trend_{today_str}.xlsx")
 
     export_cols = ["排名", "指数名称", "状态", "当日涨幅%", "收盘点位",
-                   "临界值点", "偏离率%", "穿越日期", "区间涨幅%"]
-    display_df = result_df[export_cols]
+                   "临界值点", "偏离率%", "穿越日期", "持续天数", "MA20斜率%"]
 
-    yes_count = (result_df["状态"] == "YES").sum()
-    total = len(result_df)
-    data_date = result_df["数据日期"].iloc[0]
-
-    # 终端打印
-    table = tabulate(display_df, headers="keys", tablefmt="simple",
-                     showindex=False, numalign="right", stralign="center")
-    print(f"\n{'=' * 90}")
-    print(f"  指数趋势强度统计  |  数据日期: {data_date}  |  MA周期: {MA_PERIOD}")
-    print(f"{'=' * 90}")
-    print(table)
-    print(f"{'=' * 90}")
-    print(f"  多头(YES): {yes_count}/{total}  |  空头(NO): {total - yes_count}/{total}\n")
-
-    # 写入 Excel
     with pd.ExcelWriter(filepath, engine="openpyxl") as writer:
-        display_df.to_excel(writer, sheet_name=today_str, index=False)
-        ws = writer.sheets[today_str]
+        # Sheet 1: 指数
+        if not index_df.empty:
+            idx_display = index_df[export_cols]
+            data_date = index_df["数据日期"].iloc[0]
+            yes_count = (index_df["状态"] == "YES").sum()
+            total = len(index_df)
 
-        # 百分比列的索引（1-based，+1因为openpyxl从1开始）
-        pct_col_names = {"当日涨幅%", "偏离率%", "区间涨幅%"}
-        pct_col_indices = [i + 1 for i, col in enumerate(export_cols) if col in pct_col_names]
+            idx_display.to_excel(writer, sheet_name="指数", index=False, startrow=1)
+            title = f"指数趋势强度统计  |  数据日期: {data_date}  |  MA周期: {MA_PERIOD}  |  多头: {yes_count}/{total}  空头: {total - yes_count}/{total}"
+            _write_sheet(writer.sheets["指数"], idx_display, export_cols, title)
+            _print_table(idx_display, "指数趋势强度统计", data_date)
 
-        base_size = 13
-        red_font = Font(color="FF0000", size=base_size)
-        green_font = Font(color="008000", size=base_size)
-        normal_font = Font(size=base_size)
+        # Sheet 2: 板块
+        if not sector_df.empty:
+            sec_display = sector_df[export_cols]
+            data_date = sector_df["数据日期"].iloc[0]
+            yes_count = (sector_df["状态"] == "YES").sum()
+            total = len(sector_df)
 
-        # 表头样式
-        header_font = Font(bold=True, size=base_size)
-        header_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
-        for col_idx in range(1, len(export_cols) + 1):
-            cell = ws.cell(row=1, column=col_idx)
-            cell.font = header_font
-            cell.fill = header_fill
-            cell.alignment = Alignment(horizontal="center")
-
-        center_align = Alignment(horizontal="center", vertical="center")
-
-        # 数据行着色 + 居中
-        for row_idx in range(2, len(display_df) + 2):
-            for col_idx in range(1, len(export_cols) + 1):
-                cell = ws.cell(row=row_idx, column=col_idx)
-                cell.alignment = center_align
-                cell.font = normal_font
-                if col_idx in pct_col_indices:
-                    val = cell.value
-                    if val is not None and val != 0:
-                        cell.font = red_font if val > 0 else green_font
-            # 行高
-            ws.row_dimensions[row_idx].height = 24
-
-        # 表头行高
-        ws.row_dimensions[1].height = 28
-
-        # 列宽：根据内容自适应，中文字符按2倍宽度计算
-        for col_idx in range(1, len(export_cols) + 1):
-            col_letter = get_column_letter(col_idx)
-            max_len = 0
-            for r in range(1, len(display_df) + 2):
-                val = str(ws.cell(row=r, column=col_idx).value or "")
-                # 中文字符占2个宽度
-                char_len = sum(2 if ord(c) > 127 else 1 for c in val)
-                max_len = max(max_len, char_len)
-            ws.column_dimensions[col_letter].width = max(max_len + 6, 12)
-
-        # 添加自动筛选（排序功能）
-        last_col = get_column_letter(len(export_cols))
-        last_row = len(display_df) + 1
-        ws.auto_filter.ref = f"A1:{last_col}{last_row}"
+            sec_display.to_excel(writer, sheet_name="板块", index=False, startrow=1)
+            title = f"板块趋势强度统计  |  数据日期: {data_date}  |  MA周期: {MA_PERIOD}  |  多头: {yes_count}/{total}  空头: {total - yes_count}/{total}"
+            _write_sheet(writer.sheets["板块"], sec_display, export_cols, title)
+            _print_table(sec_display, "板块趋势强度统计", data_date)
 
     print(f"  已导出: {filepath}")
 
 
-def main():
-    print("正在获取指数数据...\n")
-
+def _fetch_group(config_list: list, label: str) -> pd.DataFrame:
+    """获取一组指数/板块数据，返回排序后的 DataFrame"""
+    print(f"正在获取{label}数据...\n")
     results = []
-    for i, cfg in enumerate(INDEX_CONFIG):
-        print(f"  [{i + 1}/{len(INDEX_CONFIG)}] {cfg['name']}... ", end="", flush=True)
+    for i, cfg in enumerate(config_list):
+        print(f"  [{i + 1}/{len(config_list)}] {cfg['name']}... ", end="", flush=True)
         result = process_index(cfg)
         if result:
             results.append(result)
             print(f"OK  收盘:{result['收盘点位']}  偏离率:{result['偏离率%']}%")
-        time.sleep(0.5)  # 防止请求过快
+        time.sleep(0.5)
 
     if not results:
-        print("\n所有指数获取失败，请检查网络连接。")
+        print(f"\n所有{label}获取失败。")
+        return pd.DataFrame()
+
+    df = pd.DataFrame(results)
+    df = df.sort_values("当日涨幅%", ascending=False).reset_index(drop=True)
+    df.insert(0, "排名", range(1, len(df) + 1))
+    return df
+
+
+def main():
+    index_df = _fetch_group(INDEX_CONFIG, "指数")
+    sector_df = _fetch_group(SECTOR_CONFIG, "板块")
+
+    if index_df.empty and sector_df.empty:
+        print("\n所有数据获取失败，请检查网络连接。")
         return
 
-    # 构建 DataFrame，按偏离率降序排名
-    result_df = pd.DataFrame(results)
-    result_df = result_df.sort_values("当日涨幅%", ascending=False).reset_index(drop=True)
-    result_df.insert(0, "排名", range(1, len(result_df) + 1))
-
-    # 输出
-    export_excel(result_df)
+    export_excel(index_df, sector_df)
 
 
 if __name__ == "__main__":
